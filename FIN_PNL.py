@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import matplotlib.widgets as widgets
 import plotly.express as px
 import plotly.graph_objects as go
+#HIHI
 # Hàm kết nối tới cơ sở dữ liệu PostgreSQL
 def connect_to_db():
     conn = psycopg2.connect(
