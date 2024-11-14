@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import matplotlib.widgets as widgets
 import plotly.express as px
 import plotly.graph_objects as go
+import time
 #HIHI123
 # Hàm kết nối tới cơ sở dữ liệu PostgreSQL
 def connect_to_db():
@@ -186,14 +187,6 @@ def fetch_authors_by_fact_pnl(conn):
         authors = cur.fetchall()
     return [author[0] for author in authors]
 
-# Hàm truy vấn lấy danh sách alpha theo tác giả từ bảng fact_pnl
-def fetch_alphas_by_fact_pnl(conn, author_key):
-    query = f"SELECT f.alpha_key  FROM fact_pnl01 f WHERE f.author_key = %s;"
-    params = (author_key,)
-    with conn.cursor() as cur:
-        cur.execute(query,params)
-        alphas = cur.fetchall()
-    return [alpha[0] for alpha in alphas]
 
 # Hàm truy vấn lấy dữ liệu PNL theo tác giả từ bảng fact_pnl và lấy tên cột
 def fetch_pnl_by_author(conn, author_key, status=None):
@@ -213,7 +206,7 @@ def fetch_pnl_by_author(conn, author_key, status=None):
         ) p1
         WHERE p1.rn = 1
     ) p ON p.alpha_key = f.alpha_key
-    WHERE 1=1;
+    WHERE 1=1 
 
 
     """
@@ -226,9 +219,11 @@ def fetch_pnl_by_author(conn, author_key, status=None):
 
     # Thêm điều kiện lọc cho trạng thái nếu có
     if status and status != "Xem tất cả":
-        query += " AND d.status = %s"
-        params += (status,)
-
+        if status == ' ':
+            query += " AND (d.status is null or d.status = ' ')"
+        else:
+            query += " AND d.status = %s"
+            params += (status,)
     with conn.cursor() as cur:
         cur.execute(query, params)
         colnames = [desc[0] for desc in cur.description]
@@ -282,34 +277,6 @@ def fetch_pnl_by_alpha(conn, alpha_key):
         colnames = [desc[0] for desc in cur.description]
         pnl_data = cur.fetchall()
     return colnames, pnl_data
-def fetch_alphas_fact_pnl(conn, author_key, status=None):
-   
-    query = """
-    SELECT f.author_key, f.alpha_key
-    FROM fact_pnl01 f
-    JOIN dim_alpha d ON f.alpha_key = d.alpha_key
-    WHERE 1=1
-    """
-    params = []
-    
-    # Thêm điều kiện lọc theo author_key nếu cần
-    if author_key and author_key != "Xem tất cả":
-        query += " AND f.author_key = %s"
-        params.append(author_key)
-    
-    # Thêm điều kiện lọc theo status nếu cần
-    if status and status != "Xem tất cả":
-        query += " AND d.status = %s"
-        params.append(status)
-
-    with conn.cursor() as cur:
-        cur.execute(query, params)
-        alphas = cur.fetchall()
-    
-    # Chuyển đổi kết quả thành danh sách các dictionary và lọc alpha không phải Intraday
-    list_alphas = [{'author_key': alpha[0], 'alpha_key': alpha[1]} for alpha in alphas if not alpha[1].startswith('Intraday_')]
-    
-    return list_alphas
 def check_alpha_in_fact_positions(conn, alpha_key):
     query = """
     SELECT COUNT(1) FROM fact_positions01 WHERE alpha_key = %s
@@ -340,37 +307,30 @@ def plot_total_gain(conn, author_key, alpha_key):
     ))
     # Cập nhật bố cục của biểu đồ
     fig.update_layout(
-        title=f'PNL',
-        xaxis_title='Datetime',
-        yaxis_title='Total Gain',
-        title_x=0.5,  # Căn giữa tiêu đề
-        title_font=dict(size=20, family="Arial, sans-serif"),
+        xaxis_rangeslider_visible=True,
         width=1500,
         height=550,
         font=dict(family="Arial, sans-serif", size=14),
         template='plotly_dark',
-        legend=dict(
-            x=0.02,
-            y=0.98,
-            bgcolor='rgba(255, 255, 255, 0.8)',
-            bordercolor="Black",
-            borderwidth=1
+        xaxis=dict(
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=1, label="1m", step="month", stepmode="backward"),
+                    dict(count=6, label="3m", step="month", stepmode="backward"),
+                    dict(count=6, label="6m", step="month", stepmode="backward"),
+                    dict(step="all")
+                ])
+            ),
+            rangeslider=dict(visible=True),
+            type="date"
         )
     )
     fig.update_layout(
         shapes=[dict(type='rect', x0=0, x1=1, y0=0, y1=1, xref='paper', yref='paper', line=dict(color="black", width=1))]
     )
-    # Thêm lưới và căn chỉnh các ngày trên trục x
     fig.update_xaxes(tickformat="%Y-%m-%d")
-
-    # Hiển thị biểu đồ trong Streamlit
     st.plotly_chart(fig)
-def plot_all_total_gain(conn, author_key, status_key=None):
-    combined_df = pd.DataFrame()
-    sharpe_values = []
-
-    # Lấy danh sách alpha từ cơ sở dữ liệu
-    list_alphas = fetch_alphas_fact_pnl(conn, author_key, status_key)
+def pnl_mean(conn, author_key, status_key=None):
     colnames, pnl_data = fetch_pnl_by_author(conn, author_key, status_key)
 
     # Tính trung bình các thông số từ PnL data
@@ -378,164 +338,88 @@ def plot_all_total_gain(conn, author_key, status_key=None):
     df_mean = df_pnl[['margin', 'profit', 'mdd_score', 'mdd_percent', 
                       'trad_per_day', 'sharp', 'return', 'hitrate', 'hit_per_day']].mean()
     df_mean = pd.DataFrame([df_mean.values], columns=df_mean.index)
+    return df_mean
 
-    if len(list_alphas) == 0:
-        st.write(f"No data available for Author: {author_key}")
-        return
+
+def fetch_data_all(conn, author_key, status=None):
+    query = """
+    SELECT fd.date, fd.total_gain
+    FROM fact_daily fd
+    JOIN fact_pnl01 f ON fd.alpha_key = f.alpha_key
+    JOIN dim_alpha d ON d.alpha_key = f.alpha_key
+    LEFT JOIN (
+        SELECT p1.alpha_key, p1.position
+        FROM (
+            SELECT p1.alpha_key, p1.position, ROW_NUMBER() OVER (PARTITION BY p1.alpha_key ORDER BY p1.date DESC) AS rn
+            FROM fact_positions01 p1
+        ) p1
+        WHERE p1.rn = 1
+    ) p ON p.alpha_key = f.alpha_key
+    WHERE 1=1
+    """
+
+    # Khởi tạo danh sách điều kiện và tham số
+    params = []
+
+    if author_key and author_key != "Xem tất cả":
+        query += " AND f.author_key = %s"
+        params = (author_key,)
     else:
-        for alpha in list_alphas:
-            author_key = alpha['author_key']
-            alpha_key = alpha['alpha_key']
+        params = ()
 
-            # Lấy dữ liệu cho alpha
-            data = fetch_data_plot_position(conn, author_key, alpha_key)
-            df_plot = pd.DataFrame(data, columns=['date', 'gain', 'total_gain'])
-            df_plot.rename(columns={'date': 'Datetime', 'gain': 'Gain', 'total_gain': 'Total_gain'}, inplace=True)
-            df_plot['Datetime'] = pd.to_datetime(df_plot['Datetime'])
+    # Thêm điều kiện lọc cho trạng thái nếu có
+    if status and status != "Xem tất cả":
+        if status == ' ':
+            query += " AND (d.status is null or d.status = ' ')"
+        else:
+            query += " AND d.status = %s"
+            params += (status,)
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+        # Tạo DataFrame từ kết quả truy vấn
+        df = pd.DataFrame(cur.fetchall(), columns=[desc[0] for desc in cur.description])
 
-            # Thêm cột phân biệt alpha
-            df_plot['Alpha'] = alpha_key
-            df_plot.set_index(['Datetime'], inplace=True)
+    return df
 
-            # Tính toán Sharpe và thêm vào danh sách
-            sharp_gain = Sharp(df_plot['Total_gain'].resample("1D").last().dropna())
-            sharpe_values.append(sharp_gain)
-
-            # Kết hợp dữ liệu vào DataFrame tổng hợp
-            combined_df = pd.concat([combined_df, df_plot])
-
-        # Tính toán trung bình không trọng số
-        combined_df['Mean_Gain'] = combined_df.groupby(combined_df.index)['Total_gain'].mean()
-        mean_sharpe_fee = np.mean(sharpe_values)
-
-        # Tạo đồ thị trung bình không trọng số
-        fig, ax = plt.subplots(figsize=(10, 2))
-        mean_gain_series = combined_df['Mean_Gain'].resample("1D").last().dropna()
-        mean_gain_series.plot(ax=ax, label=f'Sharp: {mean_sharpe_fee:.2f}')
-        
-        ax.grid()
-        ax.legend()
-        ax.set_xlabel('Time')
-        ax.set_ylabel('PNL')
-        mplcursors.cursor(ax, hover=True)
-
-        # Trả về đối tượng Figure và Axes
-        return fig, ax, df_mean
-
-    
-
-
-def plot_all_pnls(conn, author_key, status_key = None):
-    # Tạo DataFrame tổng hợp
-    combined_df = pd.DataFrame()
-    summary_dfs = []
-    sharpe_values = []
-    # Lấy danh sách alpha từ cơ sở dữ liệu
-    list_alphas = fetch_alphas_fact_pnl(conn, author_key,status_key)
-    colnames, pnl_data = fetch_pnl_by_author(conn, author_key, status_key)
-
-    # Chuyển đổi dữ liệu thành DataFrame
-    df_pnl = pd.DataFrame(pnl_data, columns=colnames)
-
-    # Tính trung bình các thông số
-    df_mean = df_pnl[['margin', 'profit', 'mdd_score', 'mdd_percent', 
-                      'trad_per_day', 'sharp', 'return', 'hitrate', 'hit_per_day']].mean()
-
-    # Chuyển DataFrame thành hàng ngang
-    df_mean = pd.DataFrame([df_mean.values], columns=df_mean.index)
-    if len(list_alphas) == 0:
-        return
-    else:
-        for alpha in list_alphas:
-            author_key = alpha['author_key']
-            alpha_key = alpha['alpha_key']
-
-            
-            # Lấy dữ liệu cho alpha
-            data = fetch_data_plot_position(conn, author_key, alpha_key)
-            df_plot = pd.DataFrame(data, columns=['date', 'gain', 'total_gain'])
-            df_plot.rename(columns={'date': 'Datetime', 'position': 'Position', 'close': 'Close'}, inplace=True)
-            df_plot['Datetime'] = pd.to_datetime(df_plot['Datetime'])
-            
-           
-            # Thêm cột phân biệt alpha và trọng số
-            df_plot['Alpha'] = alpha_key
-            df_plot.set_index(['Datetime'], inplace=True)
-
-            
-            
-            # Tạo đối tượng BacktestInformation và gọi phương thức Plot_PNL
-            backtest = BacktestInformation(df_plot.index, df_plot['Position'], df_plot['Close'], fee=0.8)
-            
-            # Gọi Plot_PNL để lấy dữ liệu cho đồ thị và lưu kết quả vào DataFrame
-            total_gain_df = backtest.Plot_PNL01(window_MA=None, plot=False)
-            duplicates = total_gain_df.index[total_gain_df.index.duplicated()]
-
-            if not duplicates.empty:
-                total_gain_df = total_gain_df.groupby(total_gain_df.index).mean()
-            df_plot['total_gain'] = total_gain_df['total_gain']
-            df_plot['total_gain_after_fee'] = total_gain_df['total_gain_after_fee']
-            sharp_gain = Sharp(df_plot['total_gain'].resample("1D").last().dropna())
-            sharpe_values.append(sharp_gain)
-            # Kết hợp dữ liệu vào DataFrame tổng hợp
-            combined_df = pd.concat([combined_df, df_plot])
-            summary_df = backtest.Summary()
-            summary_df['alpha_key'] = alpha_key  # Thêm thông tin alpha_key vào summary_df
-            summary_dfs.append(summary_df)
-
-         # Tổng hợp các summary_df lại thành một DataFrame
-        df_summary = pd.concat(summary_dfs)
-
-        # Tính trung bình cho các cột trong df_summary
-        summary_mean = df_summary.mean(numeric_only=True)
-
-        # Chuyển đổi summary_mean thành DataFrame để có thể nối ngang
-        summary_mean_df = pd.DataFrame([summary_mean.values], columns=summary_mean.index)
-
-        # Nối hai DataFrame theo chiều ngang
-        df_mean_all = pd.concat([df_mean, summary_mean_df], axis=1)
-        # Sắp xếp lại cột nếu cần
-        new_column_order = ['profit', 'profit_M', 'profit_3M', 'margin', 'margin_M', 'margin_3M', 
-                            'mdd_score', 'mdd_percent', 'trad_per_day', 'sharp', 'sharp_M', 'sharp_3M', 
-                            'hit_per_day', 'hitrate', 'hit_M', 'hit_3M', 'return', 'return_M', 'return_3M']
-        df_mean_all = df_mean_all.reindex(columns=new_column_order)
-        # Tính toán trung bình không trọng số
-        combined_df['Mean_Gain'] = combined_df.groupby(combined_df.index)['total_gain'].mean()
-        combined_df['Mean_Gain_After_Fee'] = combined_df.groupby(combined_df.index)['total_gain_after_fee'].mean()
-
-        # Trích xuất giá trị trung bình không trọng số để vẽ đồ thị
-        Mean_Gain = combined_df['Mean_Gain']
-        Mean_Gain_After_Fee = combined_df['Mean_Gain_After_Fee']
-         # Tính Sharp trung bình có trọng số
-        sharp_mean =  df_mean_all['sharp'].mean()
-        mean_sharpe_fee = np.mean(sharpe_values)
-
-        # Tạo đồ thị trung bình không trọng số
-        fig, ax = plt.subplots(figsize=(10, 2))
-
-        # Vẽ Mean Gain và hiển thị giá trị trung bình trong nhãn
-        mean_gain_series = Mean_Gain.resample("1D").last().dropna()
-        mean_gain_series.plot(
-            ax=ax, label= f'Sharp: {mean_sharpe_fee:.2f}')  # Hiển thị giá trị trung bình trong nhãn
-        # Vẽ Mean Gain After Fee và hiển thị giá trị trung bình trong nhãn
-        mean_gain_after_fee_series = Mean_Gain_After_Fee.resample("1D").last().dropna()
-        mean_gain_after_fee_series.plot(
-            ax=ax, label=f'Sharp (after fee): {sharp_mean:.2f}')  # Hiển thị giá trị trung bình trong nhãn
-
-
-
-        ax.grid()
-        ax.legend()
-        ax.set_xlabel('Time')
-        ax.set_ylabel('PNL')
-        mplcursors.cursor(ax, hover=True)
-        
-       
-        # Trả về đối tượng Figure và Axes
-        return fig, ax, df_mean_all
-    
-
-# XEM THÔNG SỐ DANH MỤC
+# Vẽ tất cả pnl 
+def plot_all_total_gain(df):
+    df['date'] = pd.to_datetime(df['date'])
+    weighted_avg_per_day = df.groupby('date').apply(
+        lambda x: (x['total_gain'].mean())
+    )
+    weighted_avg_df = weighted_avg_per_day.reset_index(name='weighted_avg')
+    # Lọc bỏ các ngày có 'weighted_avg' bằng 0
+    weighted_avg_df = weighted_avg_df[weighted_avg_df['weighted_avg'] != 0]
+    # Vẽ biểu đồ với Plotly
+    fig = px.line(weighted_avg_df, x='date', y='weighted_avg', title='PNL giả định')
+    fig.update_layout(
+        title_x=0.5,
+        title_font=dict(size=18, family="Arial, sans-serif")
+    )
+    fig.update_layout(
+        xaxis_rangeslider_visible=True,
+        width=1500,
+        height=550,
+        font=dict(family="Arial, sans-serif", size=14),
+        template='plotly_dark',
+        xaxis=dict(
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=1, label="1m", step="month", stepmode="backward"),
+                    dict(count=6, label="3m", step="month", stepmode="backward"),
+                    dict(count=6, label="6m", step="month", stepmode="backward"),
+                    dict(step="all")
+                ])
+            ),
+            rangeslider=dict(visible=True),
+            type="date"
+        )
+    )
+    fig.update_layout(
+        shapes=[dict(type='rect', x0=0, x1=1, y0=0, y1=1, xref='paper', yref='paper', line=dict(color="black", width=1))]
+    )
+    fig.update_xaxes(tickformat="%Y-%m-%d")
+    st.plotly_chart(fig)
 # Hàm lấy danh sách danh mục từ bảng danhmuc_alpha
 def fetch_danhmuc_alpha(conn):
     query = """
@@ -775,121 +659,6 @@ def fetch_list_alphas_history(conn, list_name):
     list_alphas = [{'author_key': alpha[0], 'alpha_key': alpha[1], 'trong_so': alpha[2], 'add_time': alpha[3], 'update_time': alpha[4], 'del_time': alpha[5]} for alpha in alphas]
     
     return list_alphas
-
-def get_min_max_date_fact_daily(conn, alpha_key):
-    query = """
-    SELECT MIN(date) AS min_date, MAX(date) AS max_date 
-    FROM fact_daily 
-    WHERE alpha_key = %s
-    """
-    try:
-        with conn.cursor() as cur:
-            cur.execute(query, [alpha_key])
-            result = cur.fetchone()
-            min_date = pd.to_datetime(result[0]) if result[0] is not None else pd.NaT
-            max_date = pd.to_datetime(result[1]) if result[1] is not None else pd.NaT
-            return min_date, max_date
-    except Exception as e:
-        print(f"Có lỗi xảy ra trong quá trình lấy dữ liệu từ fact_daily: {e}")
-        return None, None
-
-def fetch_and_calculate_weights_fact_daily(conn, list_name):
-    # Lấy danh sách alpha_key và chi tiết từ lịch sử
-    query = """
-    SELECT author_key, alpha_key, trong_so, add_time, update_time, del_time 
-    FROM danhmuc_history 
-    WHERE list_name = %s
-    """
-    
-    params = [list_name]
-    try:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            alphas = cur.fetchall()
-            
-        # Chuyển đổi kết quả thành DataFrame
-        list_alphas = [
-            {
-                'author_key': alpha[0],
-                'alpha_key': alpha[1],
-                'trong_so': alpha[2],
-                'add_time': alpha[3],
-                'update_time': alpha[4],
-                'del_time': alpha[5]
-            } for alpha in alphas
-        ]
-        
-        # Nếu không có bản ghi nào, trả về rỗng
-        if not list_alphas:
-            return []
-        
-        df = pd.DataFrame(list_alphas)
-        # Lọc ra các bản ghi không cần thiết
-        unique_alpha_keys = df['alpha_key'].unique()
-        results = []
-        
-        for alpha_key in unique_alpha_keys:
-            min_date, max_date = get_min_max_date_fact_daily(conn, alpha_key)
-            df_alpha = df[df['alpha_key'] == alpha_key].reset_index(drop=True)
-            add_time_to_skip = df_alpha[df_alpha['add_time'] == df_alpha['del_time']]['add_time'].unique()
-
-            df_alpha = df_alpha[~df_alpha['add_time'].isin(add_time_to_skip)].reset_index(drop=True)
-            # Tìm các bản ghi có cả update_time và del_time
-            valid_records = df_alpha.dropna(subset=['update_time', 'del_time'])
-
-            # Lấy update_time từ các bản ghi hợp lệ
-            update_times_to_skip = valid_records['update_time'].unique()
-            df_alpha = df_alpha[~df_alpha['update_time'].isin(update_times_to_skip) | (df_alpha['del_time'].notna())].reset_index(drop=True)
-            df_alpha = df_alpha.loc[~df_alpha.duplicated(subset=['add_time', 'update_time', 'del_time'], keep='last')].reset_index(drop=True)
-            # Tính toán trọng số cho từng khoảng thời gian
-            for index, row in df_alpha.iterrows():
-                weight = row['trong_so']
-                add_time = row['add_time']if not pd.isna(row['add_time']) else min_date
-                if add_time < min_date:
-                    add_time = min_date
-                update_time = row['update_time']
-                del_time = row['del_time'] if not pd.isna(row['del_time']) else max_date
-                if pd.notna(update_time) :
-                    # Trường hợp chỉ có update_time
-                    start_time = update_time
-                    # Tìm update_time nhỏ nhất lớn hơn start_time
-                    next_update_time = df_alpha.loc[df_alpha['update_time'] > start_time, 'update_time'].min()
-                   
-                    if pd.isna(next_update_time):
-                        # Nếu không có update_time nào lớn hơn, tìm del_time lớn hơn start_time
-                        next_del_time = del_time
-                        end_time = next_del_time  # Lấy del_time gần nhất lớn hơn start_time
-                       
-                    else:
-
-                        end_time = next_update_time  # Nếu có update_time, lấy giá trị lớn hơn
-                    results.append((alpha_key, weight, start_time, end_time))
-
-                elif pd.notna(add_time) and pd.isna(update_time):
-                   
-                    # Trường hợp có add_time và không có update_time 
-                    start_time = add_time 
-                    next_update_time = df_alpha.loc[df_alpha['update_time'] > start_time, 'update_time'].min()
-                    if pd.isna(next_update_time):
-                        # Nếu không có update_time nào lớn hơn, tìm del_time lớn hơn start_time
-                        next_del_time = del_time 
-                        end_time = next_del_time  
-                            
-                    else:
-                        end_time = next_update_time  # Nếu có update_time, lấy giá trị lớn hơn
-                    
-                    results.append((alpha_key, weight, start_time, end_time))
-                elif pd.notna(update_time) and pd.notna(del_time):
-                    # Trường hợp có cả add_time, update_time và del_time
-                    start_time = update_time
-                    end_time = del_time
-                    results.append((alpha_key, weight, start_time, end_time))
-        df_results = pd.DataFrame(results, columns=['alpha_key', 'trong_so', 'start', 'end'])
-
-        return df_results
-        
-    except Exception as e:
-        print(f"Có lỗi xảy ra trong quá trình truy vấn hoặc tính toán: {e}")
 def plot_multiple_total_gain_history(conn, df_results):
     records = []  # Sử dụng danh sách để lưu trữ các bản ghi
 
@@ -932,7 +701,7 @@ def plot_multiple_total_gain_history(conn, df_results):
         df_grouped = df_plot.groupby('date').apply(
             lambda x: (x['total_gain'] * x['trong_so']).sum() / x['trong_so'].sum()
         ).reset_index(name='total_gain')
-
+        df_grouped = df_grouped[df_grouped['total_gain'] != 0]
         fig = px.line(df_grouped, x='date', y='total_gain', title='PNL thực tế')
         fig.update_layout(
             title_x=0.5,  # Căn giữa tiêu đề (0: trái, 1: phải, 0.5: giữa)
@@ -958,10 +727,10 @@ def plot_multiple_total_gain_history(conn, df_results):
 
 
 
-def get_min_max_date_fact_positions01(conn, alpha_key):
+def get_min_max_date_fact_daily(conn, alpha_key):
     query = """
     SELECT MIN(date) AS min_date, MAX(date) AS max_date 
-    FROM fact_positions01
+    FROM fact_daily
     WHERE alpha_key = %s
     """
     try:
@@ -1012,7 +781,7 @@ def fetch_and_calculate_weights(conn, list_name):
         results = []
         
         for alpha_key in unique_alpha_keys:
-            min_date, max_date = get_min_max_date_fact_positions01(conn, alpha_key)
+            min_date, max_date = get_min_max_date_fact_daily(conn, alpha_key)
             df_alpha = df[df['alpha_key'] == alpha_key].reset_index(drop=True)
             add_time_to_skip = df_alpha[df_alpha['add_time'] == df_alpha['del_time']]['add_time'].unique()
 
@@ -1096,123 +865,6 @@ def fetch_and_calculate_weights(conn, list_name):
         
     except Exception as e:
         print(f"Có lỗi xảy ra trong quá trình truy vấn hoặc tính toán: {e}")
-def fetch_data_plot_position_live_fact_positions01(conn, alpha_key, start, end):
-    query = """
-    SELECT date, position, close
-    FROM fact_positions01
-    WHERE alpha_key = %s AND date >= %s AND date <= %s
-    """
-    
-    params = [alpha_key, start, end]
-    try:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            records_fetched = cur.fetchall() 
-        return records_fetched  
-
-    except Exception as e:
-        print(f"Có lỗi xảy ra trong quá trình truy vấn fact_positions01 cho alpha_key {alpha_key}: {e}")
-        return None  
-def plot_multiple_pnls_live_history(conn,df_results):
-    combined_df = pd.DataFrame()
-    sharpe_fee = []
-    sharp_after_fee = []
-    total_weights = 0
-    for index, row in df_results.iterrows():
-        alpha_key = row['alpha_key']
-        start = row['start']
-        end = row['end']
-        trong_so = row['trong_so']
-            
-        # Lấy dữ liệu cho alpha
-        data = fetch_data_plot_position_live_fact_positions01(conn, alpha_key, start, end)
-        df_plot = pd.DataFrame(data, columns=['date', 'position', 'close'])
-        df_plot.rename(columns={'date': 'Datetime', 'position': 'Position', 'close': 'Close'}, inplace=True)
-        df_plot['Datetime'] = pd.to_datetime(df_plot['Datetime'])
-        df_plot.set_index('Datetime', inplace=True)
-        
-        # Thêm cột phân biệt alpha và trọng số
-        df_plot['Alpha'] = alpha_key
-        df_plot['trong_so'] = trong_so
-        backtest = BacktestInformation(df_plot.index, df_plot['Position'], df_plot['Close'], fee=0.8)
-        # Gọi Plot_PNL để lấy dữ liệu cho đồ thị và lưu kết quả vào DataFrame
-        total_gain_df = backtest.Plot_PNL01(window_MA=None, plot=False)
-        df_plot['total_gain'] = total_gain_df['total_gain']
-        df_plot['total_gain_after_fee'] = total_gain_df['total_gain_after_fee']
-        sharp_gain = Sharp(df_plot['total_gain'].resample("1D").last().dropna())*trong_so
-        sharp = Sharp(df_plot['total_gain_after_fee'].resample("1D").last().dropna())*trong_so
-        sharp_after_fee.append(sharp)
-        sharpe_fee.append(sharp_gain)
-        total_weights += trong_so 
-        # Kết hợp dữ liệu vào DataFrame tổng hợp
-        combined_df = pd.concat([combined_df, df_plot])
-        # Lấy summary từ backtest
-    # Tính toán trung bình có trọng số
-    combined_df['Weighted_Gain'] = combined_df['total_gain'] * combined_df['trong_so']
-    combined_df['Weighted_Gain_After_Fee'] = combined_df['total_gain_after_fee'] * combined_df['trong_so']
-
-    weighted_mean_gain = combined_df.groupby(combined_df.index)['Weighted_Gain'].sum() / combined_df.groupby(combined_df.index)['trong_so'].sum()
-    weighted_mean_gain_after_fee = combined_df.groupby(combined_df.index)['Weighted_Gain_After_Fee'].sum() / combined_df.groupby(combined_df.index)['trong_so'].sum()
-    sharp = sum(sharp_after_fee) / total_weights if total_weights != 0 else 0
-    sharp_fee = sum(sharpe_fee) / total_weights if total_weights != 0 else 0
-     # Tạo đồ thị trung bình không trọng số
-    mean_gain_series = weighted_mean_gain.resample("1D").last().dropna()
-    mean_gain_after_fee_series = weighted_mean_gain_after_fee.resample("1D").last().dropna()
-
-    # Tạo biểu đồ đường với plotly
-    fig = go.Figure()
-
-    # Thêm dòng cho Mean Gain After Fee
-    fig.add_trace(go.Scatter(
-        x=mean_gain_after_fee_series.index,
-        y=mean_gain_after_fee_series.values,
-        mode='lines',
-        name=f'Sharp (after fee): {sharp:.2f}', 
-        line=dict(color='#1f77b4')
-    ))
-
-    # Cập nhật bố cục của biểu đồ
-    fig.update_layout(
-        title='PNL thực tế',
-        xaxis_title='Date',
-        yaxis_title='PNL',
-        title_x=0.5,  # Căn giữa tiêu đề
-        title_font=dict(size=20, family="Arial, sans-serif"),
-        xaxis=dict(
-            rangeselector=dict(
-                buttons=list([
-                    dict(count=1, label="1m", step="month", stepmode="backward"),
-                    dict(count=6, label="3m", step="month", stepmode="backward"),
-                    dict(count=6, label="6m", step="month", stepmode="backward"),
-                    dict(step="all")
-                ])
-            ),
-            rangeslider=dict(visible=True),
-            type="date"
-        ),
-        width=1500,
-        height=600,
-        font=dict(family="Arial, sans-serif", size=14),
-        template='plotly_dark', 
-        legend=dict(
-        x=0.02,  # Vị trí trên trục x (0: bên trái, 1: bên phải)
-        y=0.98,  # Vị trí trên trục y (0: dưới, 1: trên)
-        bgcolor='rgba(255, 255, 255, 0.8)',  # Đặt nền trắng với độ trong suốt
-        bordercolor="Black",
-        borderwidth=1
-    )
-    )
-    fig.update_layout(
-        shapes=[dict(type='rect', x0=0, x1=1, y0=0, y1=1, xref='paper', yref='paper', line=dict(color="black", width=1))]
-    )
-    # Thêm lưới và căn chỉnh các ngày trên trục x
-    fig.update_xaxes(tickformat="%Y-%m-%d")
-
-    # Hiển thị biểu đồ trong Streamlit
-    st.plotly_chart(fig)
-
-
-
 ### Lọc điều kiện 
 
 # Hàm truy vấn lấy dữ liệu PNL theo điều kiện
@@ -1692,14 +1344,7 @@ def fetch_list_name(conn):
         cur.execute(query)
         names = cur.fetchall()
     return [name[0] for name in names]
-def fetch_alpha_by_list_name(conn, list_name):
-    query = f"""select * from danhmuc_alpha where list_name = %s"""
-    params = (list_name,)
-    with conn.cursor() as cur:
-        cur.execute(query,params)
-        colnames = [desc[0] for desc in cur.description]
-        pnl_data = cur.fetchall()
-    return colnames, pnl_data
+
 
 # Hàm hiển thị dữ liệu theo dạng dọc
 def display_data_vertically(colnames, pnl_data):
@@ -1755,7 +1400,7 @@ def hien_thi_bang_du_lieu_2(df):
                     gridOptions=grid_options,
                     enable_enterprise_modules=True,
                     editable=True,
-                    update_mode=GridUpdateMode.MANUAL, 
+                    update_mode=GridUpdateMode.MODEL_CHANGED, 
                     fit_columns_on_grid_load=True,
                     height=200
                 )
@@ -1892,6 +1537,7 @@ def main():
         st.write(f"Dữ liệu PNL cho Tác giả: {author_key}")
         df = pd.DataFrame(pnl_data, columns=colnames)
         df = df[~df['alpha_key'].str.startswith('Intraday_')]
+       
         # Tạo cấu hình cho AgGrid
         grid_options = GridOptionsBuilder.from_dataframe(df)
         for col in df.columns:
@@ -1907,11 +1553,15 @@ def main():
         selected_row = grid_response['selected_rows']
     
         if not isinstance(selected_row, pd.DataFrame) :
-            fig_ax = plot_all_total_gain(conn, author_key, status_key)
-            if fig_ax is not None:
-                fig, ax,df_mean_all = fig_ax
-                st.pyplot(fig)
-                st.write(df_mean_all)
+            
+            mean = pnl_mean(conn, author_key, status_key)
+            if mean is not None:
+                df_all = fetch_data_all (conn, author_key, status_key)
+                if df_all is not None: 
+                    plot_all_total_gain(df_all)
+                    hien_thi_bang_du_lieu_2(mean)
+                else:
+                    st.write('Không có alpha nào')
 
             else:
                 st.warning("Không có dữ liệu alpha để hiển thị.")
@@ -1939,13 +1589,10 @@ def main():
                                     df_plot['Datetime'] = pd.to_datetime(df_plot['Datetime'])
                                     backtest = BacktestInformation(df_plot['Datetime'], df_plot['Position'], df_plot['Close'], fee=0.8)
                                     backtest.Plot_PNL()
-                                    summary_df = backtest.Summary01() 
-                                    
+                                    summary_df = backtest.Summary01()                 
                                     summary_df['author_key'] = author_key
                                     summary_df['alpha_key'] = alpha_key
-                                    # Kết hợp các DataFrame để tạo combined_df
                                     combined_df = pd.concat([summary_df], axis=1)                
-                                    # Hiển thị DataFrame kết hợp bằng Streamlit
                                     st.write(combined_df)
                             else:
                                 # Nếu alpha_key không có trong fact_positions01
@@ -1974,7 +1621,7 @@ def main():
             authors = fetch_authors_by_fact_positions01(conn)
             authors.insert(0, "Xem tất cả tác giả")
             selected_author = st.sidebar.selectbox("Chọn tác giả", authors)
-            selected_status = st.sidebar.selectbox("Chọn trạng thái", ["Xem tất cả", "live", "paper", "đã tắt", "wait list"])
+            selected_status = st.sidebar.selectbox("Chọn trạng thái", ["Xem tất cả", "live", "paper", "đã tắt", "wait list", "None"])
             status_key = selected_status if selected_status != "Xem tất cả" else None
             author_key = selected_author if selected_author != "Xem tất cả tác giả" else None
             colnames, pnl_data = fetch_position_by_author(conn, author_key,status_key)
@@ -1988,7 +1635,7 @@ def main():
             grid_options.configure_default_column(editable=True)
             grid_options = grid_options.build()
 
-            grid_response = AgGrid(df, gridOptions=grid_options,fit_columns_on_grid_load=True, enable_enterprise_modules=True)
+            grid_response = AgGrid(df, gridOptions=grid_options,fit_columns_on_grid_load=True, enable_enterprise_modules=True, update_mode=GridUpdateMode.COLUMN_CHANGED)
             st.write("Tổng của cột 'position':", df['position'].sum())
         else:
             hien_thi_position_danh_muc(conn)
@@ -2004,7 +1651,7 @@ def main():
             authors = fetch_authors_by_fact_pnl(conn)
             authors.insert(0, "Xem tất cả tác giả")
             selected_author = st.sidebar.selectbox("Chọn tác giả", authors)
-            selected_status = st.sidebar.selectbox("Chọn trạng thái", ["Xem tất cả", "live", "paper", "đã tắt", "wait list"])
+            selected_status = st.sidebar.selectbox("Chọn trạng thái", ["Xem tất cả", "live", "paper", "đã tắt", "wait list", " "])
             status_key = selected_status if selected_status != "Xem tất cả" else None
             author_key = selected_author if selected_author != "Xem tất cả tác giả" else None
             colnames, pnl_data = fetch_pnl_by_author(conn, author_key, status_key)
@@ -2030,23 +1677,23 @@ def main():
             selected_row = grid_response['selected_rows']
            
             if not isinstance(selected_row, pd.DataFrame) :
-                fig_ax = plot_all_total_gain(conn, author_key, status_key)
-                if fig_ax is not None:
-                    fig, ax,df_mean_all = fig_ax
-                    st.pyplot(fig)
-                    st.write(df_mean_all)
-                    st.write()
-                else:
-                    st.warning("Không có dữ liệu alpha để hiển thị.")
-
+                mean = pnl_mean(conn, author_key, status_key)
+                if not mean.isna().all().all():
+                   
+                    df_all = fetch_data_all (conn, author_key, status_key)
+                    if df_all is not None: 
+                        plot_all_total_gain(df_all)
+                        hien_thi_bang_du_lieu_2(mean)
+                    else:
+                        st.write('Không có alpha nào')
             else:
                 plt.close('all')  
                 # Kiểm tra kiểu dữ liệu của selected_rows
-                if isinstance(selected_row, pd.DataFrame) and len(selected_row) > 0:
+                if  len(selected_row) > 0:
                     selected_row = pd.DataFrame(selected_row)
                     
                     # Kiểm tra nếu DataFrame không rỗng và có ít nhất một hàng
-                    if not selected_row.empty and selected_row.shape[0] > 0:
+                    if  selected_row.shape[0] > 0:
                         # Truy cập cột alpha_key
                         if 'alpha_key' in selected_row.columns:
                             selected_row_data = selected_row['alpha_key']
@@ -2064,7 +1711,7 @@ def main():
                                     df_plot.rename(columns={'date': 'Datetime', 'position': 'Position', 'close': 'Close'}, inplace=True)
                                     df_plot['Datetime'] = pd.to_datetime(df_plot['Datetime'])
                                     backtest = BacktestInformation(df_plot['Datetime'], df_plot['Position'], df_plot['Close'], fee=0.8)
-                                    backtest.Plot_PNL()
+                                    plot_total_gain(conn,author_key,alpha_key)
                                     summary_df = backtest.Summary01() 
                                     
                                     summary_df['author_key'] = author_key
@@ -2078,7 +1725,7 @@ def main():
                                     colnames, pnl_data = fetch_pnl_by_alpha(conn, alpha_key)
                                     plot_total_gain(conn, author_key, alpha_key)
                                     display_df = display_data_vertically(colnames, pnl_data)
-                                    grid_response1 = hien_thi_bang_du_lieu_3(display_df)
+                                    grid_response1 = hien_thi_bang_du_lieu_2(display_df)
                             else:
                                 st.error("Không tìm thấy thông tin 'Alpha' trong hàng được chọn.")
                         else:
@@ -2113,12 +1760,21 @@ def main():
 
                             if list_name:
                                 list_alphas = fetch_list_alphas(conn, list_name)
+                                
                                 all_alphas_exist = all(check_alpha_in_fact_positions(conn, alpha['alpha_key']) for alpha in list_alphas)
+                                
+
+                                # Tính toán và in ra thời gian đã trôi qua
+                                
                                 if all_alphas_exist:
                                     colnames, pnl_data = fetch_pnl_list_name_live(conn, list_name)
                                     display_df = display_data_vertically(colnames, pnl_data)
                                     # Gọi hàm plot_multiple_pnls và nhận kết quả
+                                    start_time = time.time()
                                     summary_df = tinh_toan_thong_so_live(conn, list_name)
+                                    end_time = time.time()
+                                    elapsed_time = end_time - start_time
+                                    st.write(f"Time taken: {elapsed_time:.4f} seconds")
                                     data_daily = fetch_data(conn, list_name)
                                     plot_multiple_total_gain(data_daily)
 
@@ -2227,10 +1883,9 @@ def main():
 
                 selected_row = grid_response['selected_rows']
 
-                if isinstance(selected_row, pd.DataFrame) and len(selected_row) > 0:
+                if len(selected_row) > 0:
                     selected_row_df = pd.DataFrame(selected_row)
-                    if not selected_row_df.empty:
-                        author_key = selected_row_df['author_key'].iloc[0]
+                    author_key = selected_row_df['author_key'].iloc[0]
                 if st.button("Xóa"):
                     delete_author(conn, author_key)
                     st.experimental_rerun()  # Reload lại trang để cập nhật bảng
@@ -2267,12 +1922,11 @@ def main():
                 st.write("Danh sách alpha:")
                 df = pd.DataFrame(data, columns=colnames)
                 df = df[~df['alpha_key'].str.startswith('Intraday_')]
-
                 grid_options = GridOptionsBuilder.from_dataframe(df)
                 grid_options.configure_selection('single')
                 grid_options.configure_side_bar()
 
-                grid_options.configure_column('status', editable=True, cellEditor='agSelectCellEditor', cellEditorParams={'values': ['live', 'paper', 'đã tắt', 'wait list']})
+                grid_options.configure_column('status', editable=True, cellEditor='agSelectCellEditor', cellEditorParams={'values': ['live', 'paper', 'đã tắt', 'wait list', ' ']})
                 list_name_values = fetch_list_name_from_danhmuc(conn)
                 grid_options.configure_column('mark', editable=True, cellEditor='agTextCellEditor', cellEditorParams={'values': list_name_values})
                 grid_options.configure_column('start_date', editable=True, cellEditor='agTextCellEditor')
@@ -2283,7 +1937,7 @@ def main():
                     gridOptions=grid_options,
                     enable_enterprise_modules=True,
                     editable=True,
-                    update_mode=GridUpdateMode.MODEL_CHANGED,
+                    update_mode=GridUpdateMode.MANUAL,
                     fit_columns_on_grid_load=True,
                     height=600
                 )
@@ -2309,14 +1963,13 @@ def main():
 
                 selected_row = grid_response['selected_rows']
 
-                if isinstance(selected_row, pd.DataFrame) and len(selected_row) > 0:
+                if isinstance(selected_row, pd.DataFrame) :
                     selected_row_df = pd.DataFrame(selected_row)
-                    if not selected_row_df.empty:
-                        alpha_key = selected_row_df['alpha_key'].iloc[0]
-                        author_key = selected_row_df['author_key'].iloc[0]
+                    alpha_key = selected_row_df['alpha_key'].iloc[0]
+                    author_key = selected_row_df['author_key'].iloc[0]
                 if st.button("Xóa"):
                     delete_alpha(conn, alpha_key, author_key)
-                    st.experimental_rerun()  # Reload lại trang để cập nhật bảng
+                    st.experimental_rerun()  
                 
             
         elif alpha_action == "Thêm alpha":
@@ -2326,7 +1979,7 @@ def main():
             selected_author = st.sidebar.selectbox("Chọn tác giả", authors)
             author_key = selected_author if selected_author != "Xem tất cả tác giả" else None
             new_date_start = st.sidebar.date_input("Chọn ngày bắt đầu")
-            new_status = st.sidebar.selectbox("Chọn trạng thái", [ "live", "paper", "đã tắt", "wait list"])
+            new_status = st.sidebar.selectbox("Chọn trạng thái", [ "live", "paper", "đã tắt", "wait list", " "])
             new_mark = st.sidebar.selectbox("Chọn đánh dấu", [ "true", "false"])
             new_type = st.sidebar.selectbox("Chọn type", [ "TA", "ML", "Candidate"])
             if st.sidebar.button("Thêm"):
@@ -2428,9 +2081,8 @@ def main():
                 grid_response = hien_thi_bang_du_lieu_2(filtered_df)
                 # Lấy hàng được chọn
                 if grid_response is not None:
-                    
                     selected_row = grid_response['selected_rows']
-                    if isinstance(selected_row, pd.DataFrame) and len(selected_row) > 0:
+                    if isinstance(selected_row, pd.DataFrame) :
                         selected_row_df = pd.DataFrame(selected_row)
                         st.session_state.selected_row = selected_row_df  # Lưu lại trạng thái
 
@@ -2478,7 +2130,7 @@ def main():
                                     data_history = pd.DataFrame(alphas_history)
                                     data_daily = fetch_data(conn, list_name)
                                     plot_multiple_total_gain(data_daily)
-                                    df_results=fetch_and_calculate_weights_fact_daily(conn, list_name)
+                                    df_results=fetch_and_calculate_weights(conn, list_name)
                                     df_plot = plot_multiple_total_gain_history(conn, df_results)
                                     st.write('Danh sách alpha có trong danh mục')
                                     grid_response1 = hien_thi_bang_du_lieu_3(combined_df)
@@ -2690,7 +2342,7 @@ def main():
                                 data_daily = fetch_data(conn, list_name)
                                 plot_multiple_total_gain(data_daily)
                                 df_results=fetch_and_calculate_weights(conn, list_name)
-                                plot_multiple_pnls_live_history(conn, df_results)
+                                plot_multiple_total_gain_history(conn, df_results)
 
                                 # Kết hợp và hiển thị bảng đã chỉnh sửa
                                 if 'alpha_key' in display_df.columns and 'alpha_key' in summary_df.columns:
@@ -2713,7 +2365,7 @@ def main():
                                 data_history = pd.DataFrame(alphas_history)
                                 data_daily = fetch_data(conn, list_name)
                                 plot_multiple_total_gain(conn,  data_daily)
-                                df_results=fetch_and_calculate_weights_fact_daily(conn, list_name)
+                                df_results=fetch_and_calculate_weights(conn, list_name)
                                 plot_multiple_total_gain_history(conn, df_results)
                                 st.write('Danh sách alpha có trong danh mục')
                                 grid_response1 = hien_thi_bang_du_lieu_3(combined_df)
